@@ -65,7 +65,7 @@ public class AvscDependecyResolve {
 				value = token;
 			} else {
 				value = unsolved.get(name);
-				value = value == null ? token : resolve(value, name);
+				value = value == null ? token : resolve(name, value);
 			}
 			sb.append(value);
 			index = m.end();
