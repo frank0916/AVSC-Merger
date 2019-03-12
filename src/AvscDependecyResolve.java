@@ -1,119 +1,126 @@
-/*
- * HttpRunner provides method to create http connection
- */
-package loadtester;
-
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.io.PrintWriter;
-import java.net.HttpURLConnection;
-import java.net.URL;
+package avscmerger;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.Writer;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
-/**
- *
- * @author frank
- */
-public abstract class HttpRunner extends Runner {
+public class AvscDependecyResolve {
+	char FP = File.separatorChar;
 
-	public abstract void parse(String response, Map<String, String> map);
+	String source, target;
 
-	abstract Converter newConvertor();
-
-	public Converter getConverter(int index) {
-		Converter converter = Converter.getInstance(index);
-		if (converter != null) {
-			return converter;
-		}
-		synchronized (HttpRunner.class) {
-			converter = Converter.getInstance(index);
-			if (converter != null) {
-				return converter;
-			}
-			return Converter.setInstance(index, newConvertor());
-		}
+	public AvscDependecyResolve(String source, String target) {
+		this.source = source;
+		this.target = target;
 	}
 
-	HttpURLConnection open(String url, String method) throws Exception {
+	private Map<String, String> unsolved = new HashMap<>();
+
+	/**
+	 * Register a unsolved file
+	 * 
+	 * @param file
+	 * @throws Exception
+	 */
+	public void register(File file) {
 		try {
-			URL u = new URL(url);
-			HttpURLConnection c = (HttpURLConnection) u.openConnection();
-			c.setRequestMethod(method);
-			c.setDoOutput("POST".equals(method));
-			c.setDoInput(true);
-			return c;
+			String s = Files.lines(Paths.get(file.getPath())).collect(Collectors.joining());
+			int start = s.indexOf("{") + 1;
+			int end = s.indexOf(",", start);
+			String name = s.substring(start, end);
+			name = name.split(":")[1].replace("\"", "").trim();
+			start = s.indexOf("namespace", end);
+			end = s.indexOf(",", start);
+			String namespace = s.substring(start, end);
+			namespace = namespace.split(":")[1].replace("\"", "").trim();
+			name = namespace + "." + name;
+			unsolved.put(name, s);
 		} catch (Throwable t) {
-			Log.err("Fail to create connection " + method + " - " + url);
-			return null;
+			t.printStackTrace();
 		}
 	}
 
-	void run() {
-		int ns = -1;
-		Map<String, String> map = vars.get();
-		int index = getIndex(map);
-		Log.debug("index=" + index);
-		try {
-			HttpConverter converter = (HttpConverter) getConverter(index);
-			String rqst = converter.get(2);
-			rqst = Utils.replace(rqst, map);
-			Log.debug("request=" + rqst);
+	private Map<String, String> resolved = new HashMap<>();
 
-			byte[] req = rqst.length() == 0 ? null : converter.encode(rqst);
+	Pattern p = Pattern.compile("\"[a-zA-Z][a-zA-Z0-9_]*\"");
 
-			String s = converter.get(1);
-			String url = Utils.replace(s, map);
-			Log.debug("url=" + url);
+	public String resolve(String key, String text) {
+		String schema = resolved.get(key);
+		if (schema != null) {
+			return schema;
+		}
 
-			String method = req == null ? "GET" : "POST";
-
-			Log.debug("method=" + method);
-
-			long start = System.nanoTime();
-			Log.debug("start=" + start);
-			HttpURLConnection cn = open(url, method);
-			converter.setRequestProperties(cn);
-			cn.connect();
-
-			if (req != null) {
-				try (OutputStream os = cn.getOutputStream()) {
-					os.write(req);
-				}
-			}
-			int code = cn.getResponseCode();
-			if (code >= 400) {
-				try (InputStream in = cn.getErrorStream()) {
-					Log.err("url : " + url);
-					Log.err("request: " + rqst);
-					String err = new String(in.readAllBytes());
-					Log.err("error message : " + err);
-				}
-				ns = -2;
+		Matcher m = p.matcher(text);
+		StringBuilder sb = new StringBuilder();
+		int index = 0;
+		while (m.find()) {
+			int start = m.start();
+			sb.append(text.substring(index, start));
+			String token = m.group();
+			String name = token.substring(1, token.length() - 1);
+			String value = null;
+			if (name.equals(key)) {
+				value = token;
 			} else {
-				byte[] res = null;
-				try (InputStream is = cn.getInputStream()) {
-					res = is.readAllBytes();
-					long end = System.nanoTime();
-					Log.debug("end=" + end);
-					String response = converter.decode(res);
-					Log.debug("response=" + response);
-					parse(response, map);
-					ns = (int) ((end - start) / 10000);
-				}
+				value = unsolved.get(name);
+				value = value == null ? token : resolve(name, value);
 			}
-			if (ns == -1 && index == 2) {
-				Log.out("url : " + url);
-				Log.out("request: " + rqst);
+			sb.append(value);
+			index = m.end();
+		}
+		sb.append(text.substring(index));
+		schema = sb.toString();
+
+		resolved.put(key, schema);
+		return schema;
+	}
+
+	public void resolveDir(File dir) {
+		File[] files = dir.listFiles();
+		for (File file : files) {
+			register(file);
+		}
+		String d = target + FP + dir.getName();
+		if (!new File(d).mkdirs()) {
+			System.err.println(d + " directory is not created.");
+		}
+		unsolved.forEach((k, v) -> {
+			String s = resolve(k, v);
+			File avsc = new File(d + FP + k + ".avsc");
+			try (Writer w = new FileWriter(avsc)) {
+				w.append(s);
+				w.close();
+			} catch (IOException e) {
+				System.err.println("File write error : " + avsc);
 			}
-		} catch (Throwable t) {
-			ns = -3;
-			Log.err("Unexpected error: " + index);
-			Log.err(t);
+		});
+	}
+
+	public void resolveDirs() {
+		try {
+			File[] dirs = new File(source).listFiles(File::isDirectory);
+			for (File dir : dirs) {
+				resolveDir(dir);
+			}
+		} catch (Exception e) {
+			System.err.println("Exception thrown in combineSchema " + e);
 		}
 
-		PrintWriter p = getWriter();
-		if (p != null) {
-			p.printf("%d,%d\n", ns, index);
+	}
+
+	public static void main(String[] args) {
+		if (args.length < 2) {
+			System.err.println("Missing director of source or target files");
+			System.err.println("Usage: java AvscDependecyResolve source targe");
+			return;
 		}
+		new AvscDependecyResolve(args[0], args[1]).resolveDirs();
 	}
 }
