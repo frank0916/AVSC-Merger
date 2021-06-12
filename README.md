@@ -9,6 +9,6 @@ combined avsc files will be created in sub directories in ${target}
 # git fork
 1. fork repsoitory.
 2. clone the forked.
-git remote add upstream https://link-to-upstream.git
-git remote -v
+3. git remote add upstream https://link-to-upstream.git
+4. git remote -v
 
